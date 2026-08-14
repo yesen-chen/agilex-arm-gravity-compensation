@@ -31,7 +31,12 @@ class CartesianImpedanceController:
             raise ValueError("frame_name 不能为空")
 
         self.frame_name = frame_name
-        self.pin_model = AgxPinocchio(urdf_path)
+        self.pin_model = AgxPinocchio(
+            urdf_path,
+            expected_nq=self.dofs,
+            expected_nv=self.dofs,
+            required_frames=[frame_name],
+        )
         self.Bc = np.zeros(6, dtype=float)
         self.Kc = np.zeros(6, dtype=float)
         self.joint_torque_weights = np.ones(self.dofs, dtype=float)

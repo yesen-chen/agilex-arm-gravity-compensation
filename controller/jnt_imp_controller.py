@@ -17,7 +17,11 @@ class JointImpedanceController:
         if self.dofs <= 0:
             raise ValueError("dofs 必须为正整数")
 
-        self.pin_model = AgxPinocchio(urdf_path)
+        self.pin_model = AgxPinocchio(
+            urdf_path,
+            expected_nq=self.dofs,
+            expected_nv=self.dofs,
+        )
         self.B = np.zeros(self.dofs, dtype=float)
         self.K = np.zeros(self.dofs, dtype=float)
         self.set_jnt_params(

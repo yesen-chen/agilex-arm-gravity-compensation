@@ -1,7 +1,7 @@
 import os
 import numpy as np
 import pinocchio as pin
-from typing import Optional, Tuple
+from typing import Iterable, Optional, Tuple
 
 
 class helper:
@@ -46,7 +46,14 @@ class helper:
 class AgxPinocchio:
 
     # ===== 初始化与模型状态 =====
-    def __init__(self, urdf_path=None):
+    def __init__(
+        self,
+        urdf_path=None,
+        *,
+        expected_nq: Optional[int] = None,
+        expected_nv: Optional[int] = None,
+        required_frames: Optional[Iterable[str]] = None,
+    ):
         """初始化 Pinocchio 机器人模型。
 
         参数:
@@ -57,15 +64,61 @@ class AgxPinocchio:
         """
         if urdf_path is None:
             raise ValueError("urdf_path 不能为空")
-        package_dirs = [os.path.dirname(os.path.dirname(urdf_path))]
-        self.robot = pin.RobotWrapper.BuildFromURDF(urdf_path, package_dirs)
+        urdf_path = os.path.abspath(os.fspath(urdf_path))
+        if not os.path.isfile(urdf_path):
+            raise FileNotFoundError(f"URDF 文件不存在: {urdf_path}")
+        # Controllers only need the kinematic/dynamic model. RobotWrapper's
+        # BuildFromURDF also resolves visual/collision meshes, which makes a
+        # valid dynamics URDF fail when ROS package:// resources are absent.
+        self.robot = pin.RobotWrapper(pin.buildModelFromUrdf(urdf_path))
         self.robot.data = self.robot.model.createData()
         self.nq = self.robot.model.nq
         self.nv = self.robot.model.nv
+        self.urdf_path = urdf_path
+        self.frame_names = tuple(frame.name for frame in self.robot.model.frames)
         self._default_gravity = self.robot.model.gravity.linear.copy()
 
+        if expected_nq is not None and self.nq != int(expected_nq):
+            raise ValueError(
+                f"模型位置自由度不匹配: expected nq={expected_nq}, actual nq={self.nq}, "
+                f"urdf={urdf_path}"
+            )
+        if expected_nv is not None and self.nv != int(expected_nv):
+            raise ValueError(
+                f"模型速度自由度不匹配: expected nv={expected_nv}, actual nv={self.nv}, "
+                f"urdf={urdf_path}"
+            )
+        for frame_name in required_frames or ():
+            self.require_frame(frame_name)
+
+    @property
+    def total_mass(self) -> float:
+        """返回 URDF 中所有刚体的总质量。
+
+        固定基座的惯性会被 Pinocchio 聚合到 ``inertias[0]``，因此该项也必须
+        计入；它不是额外的虚拟质量。
+        """
+        return float(sum(inertia.mass for inertia in self.robot.model.inertias))
+
+    def has_frame(self, frame_name: str) -> bool:
+        """检查模型是否包含指定 frame。"""
+        return frame_name in self.frame_names
+
+    def require_frame(self, frame_name: str) -> int:
+        """返回 frame id；不存在时给出包含 URDF 路径的明确错误。"""
+        if not self.has_frame(frame_name):
+            raise ValueError(f"模型中不存在 frame={frame_name!r}: {self.urdf_path}")
+        return int(self.robot.model.getFrameId(frame_name))
+
+    def summary(self) -> str:
+        """返回适合启动日志的模型摘要。"""
+        return (
+            f"URDF={self.urdf_path}, nq={self.nq}, nv={self.nv}, "
+            f"mass={self.total_mass:.4f} kg"
+        )
+
     def _to_model_state(self, q: np.ndarray, v: Optional[np.ndarray] = None) -> Tuple[np.ndarray, Optional[np.ndarray]]:
-        """将外部关节状态填充为模型维度。
+        """严格校验并转换外部关节状态。
 
         参数:
             q: 关节位置向量。
@@ -75,22 +128,20 @@ class AgxPinocchio:
             Tuple[np.ndarray, Optional[np.ndarray]]: (q_full, v_full_or_none)。
 
         异常:
-            ValueError: q 或 v 维度超出模型自由度。
+            ValueError: q 或 v 维度与模型自由度不一致。
         """
-        q = np.asarray(q, dtype=float).reshape(-1)
-        if q.shape[0] > self.nq:
-            raise ValueError(f"q 维度超出模型: {q.shape[0]} > {self.nq}")
-        q_full = np.zeros(self.nq, dtype=float)
-        q_full[:q.shape[0]] = q
+        q_full = np.asarray(q, dtype=float).reshape(-1)
+        if q_full.shape != (self.nq,):
+            raise ValueError(f"q 维度必须与模型 nq={self.nq} 一致，实际为 {q_full.shape}")
+        q_full = q_full.copy()
 
         if v is None:
             return q_full, None
 
-        v = np.asarray(v, dtype=float).reshape(-1)
-        if v.shape[0] > self.nv:
-            raise ValueError(f"v 维度超出模型: {v.shape[0]} > {self.nv}")
-        v_full = np.zeros(self.nv, dtype=float)
-        v_full[:v.shape[0]] = v
+        v_full = np.asarray(v, dtype=float).reshape(-1)
+        if v_full.shape != (self.nv,):
+            raise ValueError(f"v 维度必须与模型 nv={self.nv} 一致，实际为 {v_full.shape}")
+        v_full = v_full.copy()
         return q_full, v_full
 
     def _set_gravity_from_base_orientation(self, base_orientation: Optional[np.ndarray]) -> np.ndarray:
@@ -132,7 +183,7 @@ class AgxPinocchio:
         返回:
             int: frame 对应的 id。
         """
-        return self.robot.model.getFrameId(frame_name)
+        return self.require_frame(frame_name)
 
     def forward_kinematics(
         self,
@@ -174,8 +225,7 @@ class AgxPinocchio:
         q_full, _ = self._to_model_state(q)
         fid = self.frame_id(frame_name)
         jac_full = pin.computeFrameJacobian(self.robot.model, self.robot.data, q_full, fid, reference)
-        dof = np.asarray(q).reshape(-1).shape[0]
-        return jac_full[:, :dof].copy()
+        return jac_full.copy()
 
     # ===== 动力学核心 =====
     def nonlinear_effects(
@@ -203,7 +253,7 @@ class AgxPinocchio:
             nle = pin.nonLinearEffects(self.robot.model, self.robot.data, q_full, v_full)
         finally:
             self.robot.model.gravity.linear = old_gravity
-        return nle[: np.asarray(q).shape[0]]
+        return nle.copy()
 
     def inverse_dynamics(
         self,
@@ -228,9 +278,7 @@ class AgxPinocchio:
             其中重力补偿对应 v=0 且 a=0 的特例。
         """
         q_full, v_full = self._to_model_state(q, v)
-        a_vec = helper.as_vec(a, np.asarray(q).reshape(-1).shape[0], "a")
-        a_full = np.zeros(self.nv, dtype=float)
-        a_full[: a_vec.shape[0]] = a_vec
+        a_full = helper.as_vec(a, self.nv, "a")
         old_gravity = self._set_gravity_from_base_orientation(base_orientation)
         try:
             tau = pin.rnea(
@@ -242,4 +290,4 @@ class AgxPinocchio:
             )
         finally:
             self.robot.model.gravity.linear = old_gravity
-        return tau[: np.asarray(q).shape[0]]
+        return tau.copy()

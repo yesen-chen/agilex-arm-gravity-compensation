@@ -12,11 +12,16 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from controller.task_imp_controller import CartesianImpedanceController
+from piper_x.model_config import (
+    PIPER_X_ARM_DOFS,
+    PIPER_X_TCP_FRAME,
+    require_dynamics_urdf,
+)
 
 
 def main():
-    # 定义机械臂模型的URDF文件路径，根据末端执行器的安装情况修改
-    urdf_path = str(PROJECT_ROOT / "piper_x" / "piper_x" / "urdf" / "piper_x_description.urdf")
+    # 6-DOF 动力学模型包含固定夹爪惯性；夹爪开合仍由独立通道控制。
+    urdf_path = require_dynamics_urdf()
 
     # 控制频率
     control_frequency = 200.0
@@ -29,6 +34,10 @@ def main():
     )
     robot = AgxArmFactory.create_arm(cfg)
     robot.connect()
+    if robot.joint_nums != PIPER_X_ARM_DOFS:
+        raise RuntimeError(
+            f"PiperX 关节数应为 {PIPER_X_ARM_DOFS}，实际为 {robot.joint_nums}"
+        )
 
     # 等待机械臂使能
     while not robot.enable():
@@ -48,8 +57,8 @@ def main():
             break
         time.sleep(0.01)
 
-    # 末端 frame 名称：按你的 URDF 实际末端 frame 修改
-    ee_frame_name = "link6"
+    # 夹爪中心控制点；偏移由 build_gripper_dynamics_urdf.py 生成参数定义。
+    ee_frame_name = PIPER_X_TCP_FRAME
 
     # 初始化笛卡尔阻抗控制器（基于 Pinocchio）
     controller = CartesianImpedanceController(
@@ -57,6 +66,8 @@ def main():
         dofs=robot.joint_nums,
         frame_name=ee_frame_name,
     )
+    print(f"Pinocchio 模型: {controller.pin_model.summary()}")
+    print(f"笛卡尔阻抗控制 frame: {ee_frame_name}")
     
     # 关节力矩权重
     joint_torque_weights = np.array([1.0, 1.0, 1.0, 1.0, 0.5, 0.5], dtype=float)
@@ -73,6 +84,7 @@ def main():
 
     # 将当前末端位姿作为笛卡尔阻抗目标（维持当前末端位姿）
     x_target, r_target = controller.pin_model.forward_kinematics(joint_angles, ee_frame_name)
+    print(f"初始 TCP 位置: {np.array2string(x_target, precision=6)} m")
 
     # 计算世界坐标系到基座坐标系的旋转矩阵
     roll, pitch, yaw = 0, 0, 0  # 单位：deg

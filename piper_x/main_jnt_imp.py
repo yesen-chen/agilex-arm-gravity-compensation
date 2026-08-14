@@ -12,11 +12,12 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from controller.jnt_imp_controller import JointImpedanceController
+from piper_x.model_config import PIPER_X_ARM_DOFS, require_dynamics_urdf
 
 
 def main():
-    # 定义机械臂模型的URDF文件路径，根据末端执行器的安装情况修改
-    urdf_path = str(PROJECT_ROOT / "piper_x" / "piper_x" / "urdf" / "piper_x_description.urdf")
+    # 6-DOF 动力学模型包含固定夹爪惯性；夹爪开合仍由独立通道控制。
+    urdf_path = require_dynamics_urdf()
 
     # 控制频率
     control_frequency = 200.0
@@ -29,6 +30,10 @@ def main():
     )
     robot = AgxArmFactory.create_arm(cfg)
     robot.connect()
+    if robot.joint_nums != PIPER_X_ARM_DOFS:
+        raise RuntimeError(
+            f"PiperX 关节数应为 {PIPER_X_ARM_DOFS}，实际为 {robot.joint_nums}"
+        )
 
     # 等待机械臂使能
     while not robot.enable():
@@ -53,6 +58,7 @@ def main():
         urdf_path=urdf_path,
         dofs=robot.joint_nums,
     )
+    print(f"Pinocchio 模型: {controller.pin_model.summary()}")
 
     # 每个关节单独设置阻尼 b 和刚度 k（按 J1~J6 顺序）
     b = np.array([0.5, 0.8, 0.8, 0.2, 0.2, 0.2], dtype=float)
